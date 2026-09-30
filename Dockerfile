@@ -1,74 +1,65 @@
-# ========================================================
-# Stage: Frontend (Vite)
-# ========================================================
-FROM --platform=$BUILDPLATFORM node:22-alpine AS frontend
-WORKDIR /src/frontend
-COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
-COPY frontend/ ./
-COPY internal/web/translation /src/internal/web/translation
-RUN npm run build
+# ══════════════════════════════════════════════════════════════════════════
+# OMID-IRAN PANEL v2.0.0 — Production Dockerfile
+# ══════════════════════════════════════════════════════════════════════════
+# • Base: Python 3.11 Slim
+# • Railway Volume compatible
+# • Persistent data directory: /data
+# • No VOLUME declaration
+# • No non-root USER
+# • Healthcheck on /health
+# • Multi-arch compatible
+# ══════════════════════════════════════════════════════════════════════════
 
-# ========================================================
-# Stage: Builder
-# ========================================================
-FROM golang:1.27-alpine AS builder
+FROM python:3.11-slim
+
+# ── System dependencies ───────────────────────────────────────────────────
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        tzdata \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# ── Environment ───────────────────────────────────────────────────────────
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    TZ=Asia/Tehran \
+    DATA_DIR=/data \
+    PORT=8000
+
+# ── Working directory ─────────────────────────────────────────────────────
 WORKDIR /app
-ARG TARGETARCH
 
-RUN apk --no-cache --update add \
-  build-base \
-  gcc \
-  curl \
-  unzip
+# ── Python dependencies ───────────────────────────────────────────────────
+# Copy requirements separately to maximize Docker layer caching.
+COPY requirements.txt ./
 
+RUN python -m pip install --upgrade pip \
+    && python -m pip install -r requirements.txt
+
+# ── Application code ──────────────────────────────────────────────────────
 COPY . .
-COPY --from=frontend /src/internal/web/dist ./internal/web/dist
 
-ENV CGO_ENABLED=1
-ENV CGO_CFLAGS="-D_LARGEFILE64_SOURCE"
-RUN go build -ldflags "-w -s" -o build/x-ui main.go
-RUN ./DockerInit.sh "$TARGETARCH"
+# ── Persistent data directory ─────────────────────────────────────────────
+# Railway Volume will be mounted here at runtime.
+RUN mkdir -p /data \
+    && chmod 755 /data
 
-# ========================================================
-# Stage: Final Image of 3x-ui
-# ========================================================
-FROM alpine
-ENV TZ=Asia/Tehran
-WORKDIR /app
+# ── Port ──────────────────────────────────────────────────────────────────
+EXPOSE 8000
 
-RUN apk add --no-cache --update \
-  ca-certificates \
-  tzdata \
-  fail2ban \
-  bash \
-  curl \
-  openssl
+# ── Healthcheck ────────────────────────────────────────────────────────────
+HEALTHCHECK --interval=30s \
+    --timeout=5s \
+    --start-period=15s \
+    --retries=3 \
+    CMD python -c "import urllib.request, sys; \
+        response = urllib.request.urlopen( \
+            'http://127.0.0.1:8000/health', timeout=3 \
+        ); \
+        sys.exit(0 if response.status == 200 else 1)"
 
-COPY --from=builder /app/build/ /app/
-COPY --from=builder /app/DockerEntrypoint.sh /app/
-COPY --from=builder /app/x-ui.sh /usr/bin/x-ui
-COPY --from=builder /app/internal/web/translation /app/internal/web/translation
-
-
-# Configure fail2ban
-RUN rm -f /etc/fail2ban/jail.d/alpine-ssh.conf \
-  && cp /etc/fail2ban/jail.conf /etc/fail2ban/jail.local \
-  && sed -i "s/^\[ssh\]$/&\nenabled = false/" /etc/fail2ban/jail.local \
-  && sed -i "s/^\[sshd\]$/&\nenabled = false/" /etc/fail2ban/jail.local \
-  && sed -i "s/#allowipv6 = auto/allowipv6 = auto/g" /etc/fail2ban/fail2ban.conf
-
-RUN chmod +x \
-  /app/DockerEntrypoint.sh \
-  /app/x-ui \
-  /usr/bin/x-ui
-
-ENV XUI_IN_DOCKER="true"
-ENV XUI_MAIN_FOLDER="/app"
-ENV XUI_ENABLE_FAIL2BAN="true"
-ENV XUI_DB_TYPE=""
-ENV XUI_DB_DSN=""
-EXPOSE 2053
-VOLUME [ "/etc/x-ui" ]
-CMD [ "./x-ui" ]
-ENTRYPOINT [ "/app/DockerEntrypoint.sh" ]
+# ── Start command ──────────────────────────────────────────────────────────
+CMD ["python", "main.py"]
